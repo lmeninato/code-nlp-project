@@ -3,7 +3,7 @@ import torch
 from pathlib import Path
 from torch import nn
 from torch import Tensor
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, GPT2Tokenizer
 
 
 class PositionalEncoding(nn.Module):
@@ -36,18 +36,23 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
-def filter_by_token_length(tokenizer, example, max_length=512):
+def filter_by_token_length(code_tokenizer, english_tokenizer, example, max_length=512):
     """Filter out examples that are too long for the model to handle."""
-    tokenized_code = tokenizer(example["code"], return_length=True)
-    tokenized_docstring = tokenizer(example["docstring"], return_length=True)
+    tokenized_code = code_tokenizer(example["code"], return_length=True)
+    tokenized_docstring = english_tokenizer(example["docstring"], return_length=True)
 
-    def less_than_max_len(x):
+    def less_than_max_len_list(x):
         return x["length"][0] <= max_length
 
-    return less_than_max_len(tokenized_code) and less_than_max_len(tokenized_docstring)
+    def less_than_max_len(x):
+        return x["length"] <= max_length
+
+    return less_than_max_len_list(tokenized_code) and less_than_max_len(
+        tokenized_docstring
+    )
 
 
-def generate_square_subsequent_mask(sz: int) -> Tensor:
+def generate_square_subsequent_mask(sz: int, device="cpu") -> Tensor:
     """
     Generate a square mask for the sequence, masking out subsequent positions.
 
@@ -63,17 +68,39 @@ def generate_square_subsequent_mask(sz: int) -> Tensor:
         Tensor: The mask as a 2D tensor of shape (sz, sz), where the diagonal and
                 elements above the diagonal are 0, and the elements below the
                 diagonal are -inf.
+
+    probably flip this
     """
-    mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
-    mask = (
-        mask.float()
-        .masked_fill(mask == 0, float("-inf"))
-        .masked_fill(mask == 1, float(0.0))
-    )
-    return mask
+    return nn.Transformer().generate_square_subsequent_mask(sz, device=device)
 
 
-def get_tokenizer():
+def create_padding_mask(src: Tensor, pad_idx: int) -> Tensor:
+    """
+    Create padding mask for the given input tensor.
+
+    Args:
+        src (Tensor): The input tensor (shape: [batch_size, seq_length]).
+        pad_idx (int): The padding token index.
+
+    Returns:
+        Tensor: The padding mask (shape: [batch_size, seq_length]).
+    """
+    # Create a mask where True corresponds to the padding tokens
+    mask = (src == pad_idx).transpose(0, 1)
+    return mask.to(torch.float32)
+
+
+def get_english_tokenizer():
+    """
+    Get the english language tokenizer for the model.
+    From https://huggingface.co/gpt2
+    """
+    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+    tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
+
+
+def get_code_tokenizer():
     """
     Get the tokenizer for the model.
     From https://github.com/salesforce/CodeGen

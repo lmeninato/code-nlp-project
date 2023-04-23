@@ -41,7 +41,7 @@ class CodeSearchNetDataset(Dataset):
     )
     """
 
-    def __init__(self, data, tokenizer, max_length=512):
+    def __init__(self, data, code_tokenizer, english_tokenizer, max_length=512):
         """
         Initialize the dataset with data, tokenizer, and max_length.
 
@@ -51,7 +51,8 @@ class CodeSearchNetDataset(Dataset):
             max_length (int, optional): The maximum token length. Defaults to 512.
         """
         self.data = data
-        self.tokenizer = tokenizer
+        self.code_tokenizer = code_tokenizer
+        self.english_tokenizer = english_tokenizer
         self.max_length = max_length
 
     def __len__(self):
@@ -74,12 +75,12 @@ class CodeSearchNetDataset(Dataset):
         language = sample["language"]
 
         # Get the corresponding special token using the dictionary
-        lang_token = self.tokenizer.lang_to_token[language.lower()]
+        lang_token = self.code_tokenizer.lang_to_token[language.lower()]
         # Convert the lang_token to its corresponding ID
-        lang_token_id = self.tokenizer.convert_tokens_to_ids(lang_token)
+        lang_token_id = self.code_tokenizer.convert_tokens_to_ids(lang_token)
         lang_token_id_tensor = torch.tensor([lang_token_id], dtype=torch.long)
 
-        tokenized_code = self.tokenizer(
+        tokenized_code = self.code_tokenizer(
             code,
             truncation=True,
             max_length=self.max_length + 1,
@@ -87,10 +88,10 @@ class CodeSearchNetDataset(Dataset):
             return_tensors="pt",
         )
 
-        tokenized_docstring = self.tokenizer(
+        tokenized_docstring = self.english_tokenizer(
             docstring,
             truncation=True,
-            max_length=self.max_length + 1,
+            max_length=self.max_length,
             padding="max_length",
             return_tensors="pt",
         )
@@ -160,7 +161,7 @@ def load_local_dataset(lang="all", path="data"):
     return dataset
 
 
-def get_dataloader(dataset, tokenizer, args):
+def get_dataloader(dataset, code_tokenizer, english_tokenizer, args):
     """
     Get the data. Either train or validation.
     Filter out examples with more than 512 tokens (or args.max_function_length).
@@ -171,12 +172,12 @@ def get_dataloader(dataset, tokenizer, args):
     # Filter out examples with more than 512 tokens (or args.max_function_length)
     dataset = dataset.filter(
         lambda example: filter_by_token_length(
-            tokenizer, example, args.max_function_length
+            code_tokenizer, english_tokenizer, example, args.max_function_length
         )
     )
 
     dataset = CodeSearchNetDataset(
-        dataset, tokenizer, max_length=args.max_function_length
+        dataset, code_tokenizer, english_tokenizer, max_length=args.max_function_length
     )
 
     return DataLoader(

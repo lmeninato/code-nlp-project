@@ -1,4 +1,5 @@
 import math
+import torch
 from typing import Optional
 from torch.nn import (
     TransformerEncoder,
@@ -31,7 +32,7 @@ class TransformerEncoderModel(nn.Module):
         self.pos_encoder = PositionalEncoding(d_model, dropout)
         encoder_layers = TransformerEncoderLayer(d_model, nhead, d_hid, dropout)
         self.transformer_encoder = TransformerEncoder(encoder_layers, nlayers)
-        self.encoder = nn.Embedding(ntoken, d_model)
+        self.embedding = nn.Embedding(ntoken, d_model)
         self.d_model = d_model
 
         self.init_weights()
@@ -40,22 +41,23 @@ class TransformerEncoderModel(nn.Module):
         """There might be a more efficient way to do this, e.g. use
         ``torch.nn.init.xavier_uniform_``."""
         initrange = 0.1
-        self.encoder.weight.data.uniform_(-initrange, initrange)
+        self.embedding.weight.data.uniform_(-initrange, initrange)
 
-    def forward(self, src: Tensor, src_mask: Tensor) -> Tensor:
+    def forward(self, src: Tensor, src_padding_mask: Tensor) -> Tensor:
         """
         Forward pass of the transformer encoder model.
 
         Args:
             src (Tensor): The input tensor.
-            src_mask (Tensor): The source mask tensor.
+            src_padding_mask (Tensor): The source padding mask tensor. This is
+            to prevent the model from attending to the padding token.
 
         Returns:
             Tensor: The output tensor.
         """
-        src = self.encoder(src) * math.sqrt(self.d_model)
+        src = self.embedding(src) * math.sqrt(self.d_model)
         src = self.pos_encoder(src)
-        output = self.transformer_encoder(src, src_mask)
+        output = self.transformer_encoder(src, src_key_padding_mask=src_padding_mask)
         return output
 
 
@@ -79,17 +81,17 @@ class TransformerDecoderModel(nn.Module):
         self.pos_encoder = PositionalEncoding(d_model, dropout)
         decoder_layers = TransformerDecoderLayer(d_model, nhead, d_hid, dropout)
         self.transformer_decoder = TransformerDecoder(decoder_layers, nlayers)
-        self.encoder = nn.Embedding(ntoken, d_model)
+        self.embedding = nn.Embedding(ntoken, d_model)
         self.d_model = d_model
-        self.decoder = nn.Linear(d_model, ntoken)
+        self.linear = nn.Linear(d_model, ntoken)
 
         self.init_weights()
 
     def init_weights(self) -> None:
         initrange = 0.1
-        self.encoder.weight.data.uniform_(-initrange, initrange)
-        self.decoder.bias.data.zero_()
-        self.decoder.weight.data.uniform_(-initrange, initrange)
+        self.embedding.weight.data.uniform_(-initrange, initrange)
+        self.linear.bias.data.zero_()
+        self.linear.weight.data.uniform_(-initrange, initrange)
 
     def forward(
         self,
@@ -110,17 +112,31 @@ class TransformerDecoderModel(nn.Module):
         Returns:
             Tensor: The output tensor.
         """
-        tgt_embed = self.encoder(tgt) * math.sqrt(self.d_model)
+        tgt_embed = self.embedding(tgt) * math.sqrt(
+            self.d_model
+        )  # (seq_len, batch_size, d_model)
 
         if lang_token is not None:
-            lang_token_embed = self.encoder(lang_token) * math.sqrt(self.d_model)
-            tgt_embed[:, -1, :] = lang_token_embed.squeeze(1)
+            lang_token_embed = (
+                self.embedding(lang_token) * math.sqrt(self.d_model)
+            ).permute(
+                1, 0, 2
+            )  # (1, batch_size, d_model)
+
+            # Prepend the value_to_prepend tensor to the original tensor
+            tgt_embed = torch.cat(
+                (lang_token_embed, tgt_embed), dim=0
+            )  # (seq_len+2, batch_size, d_model)
+            tgt_embed = tgt_embed[:-1, :, :]  # (seq_len+1, batch_size, d_model)
             tgt_embed = self.pos_encoder(
                 tgt_embed, account_for_lang_token=True
-            )  # 16 x 513 x 256
+            )  # (seq_len+1, batch_size, d_model)
         else:
-            tgt_embed = self.pos_encoder(tgt_embed)  # 16 x 513 x 256
-
-        output = self.transformer_decoder(tgt_embed, memory, tgt_mask)
-        output = self.decoder(output)
+            tgt_embed = self.pos_encoder(tgt_embed)  # (seq_len, batch_size, d_model)
+        output = self.transformer_decoder(
+            tgt_embed, memory, tgt_mask=tgt_mask
+        )  # (seq_len, batch_size, d_model) or (seq_len+1, batch_size, d_model)
+        output = self.linear(
+            output
+        )  # (seq_len, batch_size, vocab_size) or (seq_len+1, batch_size, vocab_size)
         return output

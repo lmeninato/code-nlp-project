@@ -3,18 +3,109 @@ import torch
 from tqdm import tqdm
 import torch.nn as nn
 import torch.optim as optim
+from torch.nn.functional import one_hot
 
 from data import get_dataloader, load_local_dataset
-from utils import generate_square_subsequent_mask, get_tokenizer, save_model
+from utils import (
+    generate_square_subsequent_mask,
+    create_padding_mask,
+    get_code_tokenizer,
+    get_english_tokenizer,
+    save_model,
+)
 from model import TransformerEncoderModel, TransformerDecoderModel
+
+
+def validate_model(
+    encoder,
+    decoder_docstring,
+    decoder_code,
+    optimizer,
+    criterion,
+    valid_dataloader,
+    validation_losses,
+    epoch,
+    device,
+    code_tokenizer_pad_idx,
+    english_input_dim,
+    code_input_dim,
+):
+    encoder.eval()
+    decoder_docstring.eval()
+    decoder_code.eval()
+
+    progress_bar = tqdm(valid_dataloader, desc=f"Validation Epoch {epoch + 1}")
+    with torch.no_grad():
+        for i, (code_input, docstring_input, lang_token_id) in enumerate(progress_bar):
+            # Get the code and docstring tensors
+            # Move the input tensors to the device
+            code_input = code_input.to(device).transpose(0, 1)  # (seq_len, batch_size)
+            docstring_input = docstring_input.to(device).transpose(
+                0, 1
+            )  # (seq_len, batch_size)
+            lang_token_id = lang_token_id.to(device)  # (batch_size, 1)
+
+            # # Generate masks
+
+            code_padding_mask = create_padding_mask(
+                code_input, code_tokenizer_pad_idx
+            )  # (batch_size, seq_len)
+
+            code_mask = generate_square_subsequent_mask(code_input.size(0)).to(
+                device
+            )  # (sq_len+1, sq_len+1)
+            docstring_mask = generate_square_subsequent_mask(
+                docstring_input.size(0)
+            ).to(
+                device
+            )  # (sq_len, sq_len)
+
+            # Zero the parameter gradients
+            optimizer.zero_grad()
+
+            # Forward pass through the encoder and decoders
+            code_representation = encoder(
+                code_input, code_padding_mask
+            )  # (seq_len, batch_size, d_model)
+            reconstructed_docstring = decoder_docstring(
+                docstring_input, code_representation, docstring_mask
+            )  # (seq_len, batch_size, vocab_size)
+            reconstructed_code = decoder_code(
+                code_input, code_representation, code_mask, lang_token_id
+            )  # (seq_len+1, batch_size, vocab_size)
+
+            # Calculate the loss
+
+            loss_docstring = criterion(
+                reconstructed_docstring,
+                one_hot(docstring_input, num_classes=english_input_dim).float(),
+            )
+            loss_code = criterion(
+                reconstructed_code,
+                one_hot(code_input, num_classes=code_input_dim).float(),
+            )
+            loss = loss_docstring + loss_code
+
+            # Backward pass and optimization
+            loss.backward()
+
+            # Update loss statistics
+            if i % 100 == 99:
+                tqdm.write(f"Batch: {i + 1}, Validation Loss: {loss.item()}")
+
+            # Update the tqdm progress bar with the loss
+            progress_bar.set_postfix(Loss=loss.item())
+            validation_losses.append(loss.item())
 
 
 def train_model(
     dataloader,
     valid_dataloader,
     device,
-    input_dim,
-    num_epochs=10,
+    code_tokenizer_pad_idx,
+    english_input_dim,
+    code_input_dim,
+    num_epochs=5,
     d_model=256,
     d_hid=512,
     num_layers=2,
@@ -22,13 +113,13 @@ def train_model(
     dropout=0.1,
 ):
     encoder = TransformerEncoderModel(
-        input_dim, d_model, nhead, d_hid, num_layers, dropout
+        code_input_dim, d_model, nhead, d_hid, num_layers, dropout
     ).to(device)
     decoder_docstring = TransformerDecoderModel(
-        input_dim, d_model, nhead, d_hid, num_layers, dropout
+        english_input_dim, d_model, nhead, d_hid, num_layers, dropout
     ).to(device)
     decoder_code = TransformerDecoderModel(
-        input_dim, d_model, nhead, d_hid, num_layers, dropout
+        code_input_dim, d_model, nhead, d_hid, num_layers, dropout
     ).to(device)
 
     # Define the loss function and optimizer
@@ -51,34 +142,50 @@ def train_model(
         for i, (code_input, docstring_input, lang_token_id) in enumerate(progress_bar):
             # Get the code and docstring tensors
             # Move the input tensors to the device
-            code_input = code_input.to(device)
-            docstring_input = docstring_input.to(device)
-            lang_token_id = lang_token_id.to(device)
+            code_input = code_input.to(device).transpose(0, 1)  # (seq_len, batch_size)
+            docstring_input = docstring_input.to(device).transpose(
+                0, 1
+            )  # (seq_len, batch_size)
+            lang_token_id = lang_token_id.to(device)  # (batch_size, 1)
 
-            # Generate masks
-            code_mask = generate_square_subsequent_mask(code_input.size(0)).to(device)
+            # # Generate masks
+
+            code_padding_mask = create_padding_mask(
+                code_input, code_tokenizer_pad_idx
+            )  # (batch_size, seq_len)
+
+            code_mask = generate_square_subsequent_mask(code_input.size(0)).to(
+                device
+            )  # (sq_len+1, sq_len+1)
             docstring_mask = generate_square_subsequent_mask(
                 docstring_input.size(0)
-            ).to(device)
+            ).to(
+                device
+            )  # (sq_len, sq_len)
 
             # Zero the parameter gradients
             optimizer.zero_grad()
 
             # Forward pass through the encoder and decoders
-            code_representation = encoder(code_input, code_mask)
+            code_representation = encoder(
+                code_input, code_padding_mask
+            )  # (seq_len, batch_size, d_model)
             reconstructed_docstring = decoder_docstring(
                 docstring_input, code_representation, docstring_mask
-            )
+            )  # (seq_len, batch_size, vocab_size)
             reconstructed_code = decoder_code(
                 code_input, code_representation, code_mask, lang_token_id
-            )
+            )  # (seq_len+1, batch_size, vocab_size)
+
             # Calculate the loss
+
             loss_docstring = criterion(
-                reconstructed_docstring.permute(1, 2, 0),
-                docstring_input.transpose(0, 1),
+                reconstructed_docstring,
+                one_hot(docstring_input, num_classes=english_input_dim).float(),
             )
             loss_code = criterion(
-                reconstructed_code.permute(1, 2, 0), code_input.transpose(0, 1)
+                reconstructed_code,
+                one_hot(code_input, num_classes=code_input_dim).float(),
             )
             loss = loss_docstring + loss_code
 
@@ -94,61 +201,19 @@ def train_model(
             progress_bar.set_postfix(Loss=loss.item())
             train_losses.append(loss.item())
 
-        encoder.eval()
-        decoder_docstring.eval()
-        decoder_code.eval()
-
-        progress_bar = tqdm(valid_dataloader, desc=f"Validation Epoch {epoch + 1}")
-        with torch.no_grad():
-            for i, (code_input, docstring_input, lang_token_id) in enumerate(
-                progress_bar
-            ):
-                # Get the code and docstring tensors
-                # Move the input tensors to the device
-                code_input = code_input.to(device)
-                docstring_input = docstring_input.to(device)
-                lang_token_id = lang_token_id.to(device)
-
-                # Generate masks
-                code_mask = generate_square_subsequent_mask(code_input.size(0)).to(
-                    device
-                )
-                docstring_mask = generate_square_subsequent_mask(
-                    docstring_input.size(0)
-                ).to(device)
-
-                # Zero the parameter gradients
-                optimizer.zero_grad()
-
-                # Forward pass through the encoder and decoders
-                code_representation = encoder(code_input, code_mask)
-                reconstructed_docstring = decoder_docstring(
-                    docstring_input, code_representation, docstring_mask
-                )
-                reconstructed_code = decoder_code(
-                    code_input, code_representation, code_mask, lang_token_id
-                )
-
-                # Calculate the loss
-                loss_docstring = criterion(
-                    reconstructed_docstring.permute(1, 2, 0),
-                    docstring_input.transpose(0, 1),
-                )
-                loss_code = criterion(
-                    reconstructed_code.permute(1, 2, 0), code_input.transpose(0, 1)
-                )
-                loss = loss_docstring + loss_code
-
-                # Backward pass and optimization
-                loss.backward()
-
-                # Update loss statistics
-                if i % 100 == 99:
-                    tqdm.write(f"Batch: {i + 1}, Validation Loss: {loss.item()}")
-
-                # Update the tqdm progress bar with the loss
-                progress_bar.set_postfix(Loss=loss.item())
-                validation_losses.append(loss.item())
+        validate_model(
+            encoder=encoder,
+            decoder_docstring=decoder_docstring,
+            decoder_code=decoder_code,
+            valid_dataloader=valid_dataloader,
+            device=device,
+            code_tokenizer_pad_idx=code_tokenizer_pad_idx,
+            english_input_dim=english_input_dim,
+            code_input_dim=code_input_dim,
+            criterion=criterion,
+            validation_losses=validation_losses,
+            epoch=epoch,
+        )
 
     encoder, decoder_docstring, decoder_code, train_losses, validation_losses
 
@@ -184,12 +249,17 @@ def main():
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
-    tokenizer = get_tokenizer()
+    english_language_tokenizer = get_english_tokenizer()
+    code_tokenizer = get_code_tokenizer()
     # dataset = load_dataset("code_search_net", "python")
     dataset = load_local_dataset("python", args.data_dir)
 
-    train_dataloader = get_dataloader(dataset["train"], tokenizer, args)
-    valid_dataloader = get_dataloader(dataset["validation"], tokenizer, args)
+    train_dataloader = get_dataloader(
+        dataset["train"], code_tokenizer, english_language_tokenizer, args
+    )
+    valid_dataloader = get_dataloader(
+        dataset["validation"], code_tokenizer, english_language_tokenizer, args
+    )
 
     (
         encoder_model,
@@ -201,7 +271,9 @@ def main():
         dataloader=train_dataloader,
         valid_dataloader=valid_dataloader,
         device=device,
-        input_dim=len(tokenizer),
+        code_tokenizer_pad_idx=code_tokenizer.pad_token_id,
+        english_input_dim=len(english_language_tokenizer),
+        code_input_dim=len(code_tokenizer),
         d_model=args.d_model,
         d_hid=args.d_hid,
         num_layers=args.num_layers,
