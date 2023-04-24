@@ -41,7 +41,7 @@ class CodeSearchNetDataset(Dataset):
     )
     """
 
-    def __init__(self, data, code_tokenizer, english_tokenizer, max_length=512):
+    def __init__(self, data, code_tokenizer, english_tokenizer, max_code_length=512, max_docstring_length=512):
         """
         Initialize the dataset with data, tokenizer, and max_length.
 
@@ -53,7 +53,8 @@ class CodeSearchNetDataset(Dataset):
         self.data = data
         self.code_tokenizer = code_tokenizer
         self.english_tokenizer = english_tokenizer
-        self.max_length = max_length
+        self.max_code_length = max_code_length
+        self.max_docstring_length = max_docstring_length
 
     def __len__(self):
         return len(self.data)
@@ -83,7 +84,7 @@ class CodeSearchNetDataset(Dataset):
         tokenized_code = self.code_tokenizer(
             code,
             truncation=True,
-            max_length=self.max_length + 1,
+            max_length=self.max_code_length + 1,
             padding="max_length",
             return_tensors="pt",
         )
@@ -91,7 +92,7 @@ class CodeSearchNetDataset(Dataset):
         tokenized_docstring = self.english_tokenizer(
             docstring,
             truncation=True,
-            max_length=self.max_length,
+            max_length=self.max_docstring_length,
             padding="max_length",
             return_tensors="pt",
         )
@@ -172,12 +173,12 @@ def get_dataloader(dataset, code_tokenizer, english_tokenizer, args):
     # Filter out examples with more than 512 tokens (or args.max_function_length)
     dataset = dataset.filter(
         lambda example: filter_by_token_length(
-            code_tokenizer, english_tokenizer, example, args.max_function_length
+            code_tokenizer, english_tokenizer, example, args.max_function_length, args.max_docstring_length
         )
     )
 
     dataset = CodeSearchNetDataset(
-        dataset, code_tokenizer, english_tokenizer, max_length=args.max_function_length
+        dataset, code_tokenizer, english_tokenizer, max_code_length=args.max_function_length, max_docstring_length=args.max_docstring_length
     )
 
     return DataLoader(

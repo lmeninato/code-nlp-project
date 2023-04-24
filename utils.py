@@ -36,20 +36,18 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
-def filter_by_token_length(code_tokenizer, english_tokenizer, example, max_length=512):
+def filter_by_token_length(code_tokenizer, english_tokenizer, example, max_code_length=512, max_docstring_length=512):
     """Filter out examples that are too long for the model to handle."""
     tokenized_code = code_tokenizer(example["code"], return_length=True)
     tokenized_docstring = english_tokenizer(example["docstring"], return_length=True)
 
-    def less_than_max_len_list(x):
-        return x["length"][0] <= max_length
+    def less_than_max_len_list(x, ml):
+        return x["length"][0] <= ml
 
-    def less_than_max_len(x):
-        return x["length"] <= max_length
+    def less_than_max_len(x, ml):
+        return x["length"] <= ml
 
-    return less_than_max_len_list(tokenized_code) and less_than_max_len(
-        tokenized_docstring
-    )
+    return less_than_max_len_list(tokenized_code, max_code_length) and less_than_max_len(tokenized_docstring, max_docstring_length)
 
 
 def generate_square_subsequent_mask(sz: int, device="cpu") -> Tensor:

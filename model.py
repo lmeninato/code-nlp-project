@@ -112,31 +112,21 @@ class TransformerDecoderModel(nn.Module):
         Returns:
             Tensor: The output tensor.
         """
-        tgt_embed = self.embedding(tgt) * math.sqrt(
-            self.d_model
-        )  # (seq_len, batch_size, d_model)
-
+        tgt_embed = (self.embedding(tgt) * math.sqrt(self.d_model))  # (seq_len, batch_size, d_model)
         if lang_token is not None:
-            lang_token_embed = (
-                self.embedding(lang_token) * math.sqrt(self.d_model)
-            ).permute(
-                1, 0, 2
-            )  # (1, batch_size, d_model)
-
+            lang_token_embed = (self.embedding(lang_token) * math.sqrt(self.d_model)).permute(1, 0, 2)
+            # lang_token_embed batch size (1, batch_size, d_model)
             # Prepend the value_to_prepend tensor to the original tensor
-            tgt_embed = torch.cat(
-                (lang_token_embed, tgt_embed), dim=0
-            )  # (seq_len+2, batch_size, d_model)
-            tgt_embed = tgt_embed[:-1, :, :]  # (seq_len+1, batch_size, d_model)
-            tgt_embed = self.pos_encoder(
-                tgt_embed, account_for_lang_token=True
-            )  # (seq_len+1, batch_size, d_model)
+            tgt_embed = torch.cat((lang_token_embed, tgt_embed), dim=0)  # (seq_len+2, batch_size, d_model)
+            tgt_embed = tgt_embed[:-1, :, :]
+            # tgt_embed should be (seq_len+1, batch_size, d_model)
+            tgt_embed = self.pos_encoder(tgt_embed, account_for_lang_token=True)
+            # tgt_embed should be (seq_len+1, batch_size, d_model)
         else:
             tgt_embed = self.pos_encoder(tgt_embed)  # (seq_len, batch_size, d_model)
-        output = self.transformer_decoder(
-            tgt_embed, memory, tgt_mask=tgt_mask
-        )  # (seq_len, batch_size, d_model) or (seq_len+1, batch_size, d_model)
-        output = self.linear(
-            output
-        )  # (seq_len, batch_size, vocab_size) or (seq_len+1, batch_size, vocab_size)
+
+        output = self.transformer_decoder(tgt_embed, memory, tgt_mask=tgt_mask)
+        # output should be (seq_len, batch_size, d_model) or (seq_len+1, batch_size, d_model)
+        output = self.linear(output)
+        # output should be (seq_len, batch_size, vocab_size) or (seq_len+1, batch_size, vocab_size)
         return output

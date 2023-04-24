@@ -1,9 +1,11 @@
 import argparse
+import os
 import torch
 from tqdm import tqdm
 import torch.nn as nn
 import torch.optim as optim
 from torch.nn.functional import one_hot
+from torchsummary import summary
 
 from data import get_dataloader, load_local_dataset
 from utils import (
@@ -20,16 +22,19 @@ def validate_model(
     encoder,
     decoder_docstring,
     decoder_code,
-    optimizer,
     criterion,
     valid_dataloader,
     validation_losses,
     epoch,
     device,
     code_tokenizer_pad_idx,
-    english_input_dim,
-    code_input_dim,
+    code_coef,
+    doc_coef
 ):
+    """Evaluates model on the validation set
+
+    Args: See parameters to the train function
+    """
     encoder.eval()
     decoder_docstring.eval()
     decoder_code.eval()
@@ -39,10 +44,8 @@ def validate_model(
         for i, (code_input, docstring_input, lang_token_id) in enumerate(progress_bar):
             # Get the code and docstring tensors
             # Move the input tensors to the device
-            code_input = code_input.to(device).transpose(0, 1)  # (seq_len, batch_size)
-            docstring_input = docstring_input.to(device).transpose(
-                0, 1
-            )  # (seq_len, batch_size)
+            code_input = code_input.to(device).transpose(0, 1) # (seq_len, batch_size)
+            docstring_input = docstring_input.to(device).transpose(0, 1) # (seq_len, batch_size)
             lang_token_id = lang_token_id.to(device)  # (batch_size, 1)
 
             # # Generate masks
@@ -60,34 +63,21 @@ def validate_model(
                 device
             )  # (sq_len, sq_len)
 
-            # Zero the parameter gradients
-            optimizer.zero_grad()
-
             # Forward pass through the encoder and decoders
-            code_representation = encoder(
-                code_input, code_padding_mask
-            )  # (seq_len, batch_size, d_model)
-            reconstructed_docstring = decoder_docstring(
-                docstring_input, code_representation, docstring_mask
-            )  # (seq_len, batch_size, vocab_size)
-            reconstructed_code = decoder_code(
-                code_input, code_representation, code_mask, lang_token_id
-            )  # (seq_len+1, batch_size, vocab_size)
+            code_representation = encoder(code_input, code_padding_mask)  # (batch_size, seq_len, d_model)
+            reconstructed_docstring = decoder_docstring(docstring_input, code_representation, docstring_mask)  # (batch_size, seq_len, vocab_size)
+            reconstructed_code = decoder_code(code_input, code_representation, code_mask, lang_token_id)  # (batch_size, seq_len+1, vocab_size)
 
             # Calculate the loss
+            doc_output = reconstructed_docstring.permute(1, 0, 2).reshape(-1, reconstructed_docstring.shape[-1])
+            doc_target = docstring_input.transpose(0, 1).view(-1)
+            loss_docstring = criterion(doc_output, doc_target)
 
-            loss_docstring = criterion(
-                reconstructed_docstring,
-                one_hot(docstring_input, num_classes=english_input_dim).float(),
-            )
-            loss_code = criterion(
-                reconstructed_code,
-                one_hot(code_input, num_classes=code_input_dim).float(),
-            )
-            loss = loss_docstring + loss_code
+            code_output = reconstructed_code.permute(1, 0, 2).reshape(-1, reconstructed_code.shape[-1])
+            code_target = code_input.transpose(0, 1).view(-1)
+            loss_code = criterion(code_output, code_target)
 
-            # Backward pass and optimization
-            loss.backward()
+            loss = doc_coef * loss_docstring + code_coef * loss_code
 
             # Update loss statistics
             if i % 100 == 99:
@@ -98,6 +88,34 @@ def validate_model(
             validation_losses.append(loss.item())
 
 
+def load_latest_model_checkpoint(to_update, checkpt_dir):
+    """Load the state of the latest model checkpt.
+
+    Args:
+        checkpt_dir (str): The directory that contains model checkpoints to continue from
+
+    Returns:
+        int: the last epoch whose checkpoint was saved
+    """
+    latest_checkpt = sorted(os.listdir(checkpt_dir))[0]
+    latest_checkpt_path = os.path.join(checkpt_dir, latest_checkpt)
+    latest_checkpt_state = torch.load(latest_checkpt_path)
+    to_update.load_state_dict(latest_checkpt_state)
+    epoch = int(latest_checkpt.split(".")[0][len("epoch"):])
+    return epoch
+
+def epoch_model_save(enc, dec_code, dec_doc, output_dir, epoch):
+    """Save all models from a given epoch.
+
+    Args:
+        epoch (int): The last epoch that was saved previously
+    """
+    checkpt_name = "epoch" + str(epoch).zfill(3)
+    save_model(enc, f"{output_dir}/encoder_model/{checkpt_name}.pt")
+    save_model(dec_doc, f"{output_dir}/decoder_docstring_model/{checkpt_name}.pt")
+    save_model(dec_code, f"{output_dir}/decoder_code_model/{checkpt_name}.pt")
+
+
 def train_model(
     dataloader,
     valid_dataloader,
@@ -105,22 +123,56 @@ def train_model(
     code_tokenizer_pad_idx,
     english_input_dim,
     code_input_dim,
+    output_dir,
     num_epochs=5,
     d_model=256,
     d_hid=512,
     num_layers=2,
     nhead=4,
     dropout=0.1,
+    epochs_per_save=10,
+    batches_per_epoch=100,
+    code_coef=0.5,
+    doc_coef=0.5,
 ):
-    encoder = TransformerEncoderModel(
-        code_input_dim, d_model, nhead, d_hid, num_layers, dropout
-    ).to(device)
-    decoder_docstring = TransformerDecoderModel(
-        english_input_dim, d_model, nhead, d_hid, num_layers, dropout
-    ).to(device)
-    decoder_code = TransformerDecoderModel(
-        code_input_dim, d_model, nhead, d_hid, num_layers, dropout
-    ).to(device)
+    """Trains the model.
+
+    Args:
+        dataloader (Dataloader): The dataloader containing the training data
+        valid_dataloader (Dataloader): The dataloader containing the validation data
+        device (str): Cpu or gpu
+        code_tokenizer_pad_idx (int): The padding index
+        english_input_dim (int): The number of english vocab words
+        code_input_dim (int): The number of code vocab words
+        output_dir (str): The output directory to store model checkpoints to
+        num_epochs (int, optional): The number of training epochs to run. Defaults to 5.
+        d_model (int, optional): Transformer model dimension. Defaults to 256.
+        d_hid (int, optional): Transformer hidden dimension. Defaults to 512.
+        num_layers (int, optional): The number of transformer layers for the encoder and decoder. Defaults to 2.
+        nhead (int, optional): The number of attention heads to use. Defaults to 4.
+        dropout (float, optional): The dropout fraction to use. Defaults to 0.1.
+        epochs_per_save (int, optional): The number of epochs that go by before saving a checkpoint. Defaults to 10.
+        batches_per_epoch (int, optional): The number of batches per epoch. Defaults to 100.
+        code_coef (float, optional): A multiplier on the code recon loss. Defaults to 0.5.
+        doc_coef (float, optional): A multiplier on the docstring recon loss. Defaults to 0.5.
+
+    Returns:
+        _type_: _description_
+    """
+
+    starting_epoch = 0
+
+    encoder = TransformerEncoderModel(code_input_dim, d_model, nhead, d_hid, num_layers, dropout).to(device)
+    decoder_docstring = TransformerDecoderModel(english_input_dim, d_model, nhead, d_hid, num_layers, dropout).to(device)
+    decoder_code = TransformerDecoderModel(code_input_dim, d_model, nhead, d_hid, num_layers, dropout).to(device)
+
+    # if the checkpoint directory is not empty, start where the last run left off
+    if os.listdir(output_dir):
+        starting_epoch = load_latest_model_checkpoint(encoder, f"{output_dir}/encoder_model")
+        _ = load_latest_model_checkpoint(decoder_code, f"{output_dir}/decoder_code_model")
+        _ = load_latest_model_checkpoint(decoder_docstring, f"{output_dir}/decoder_docstring_model")
+        starting_epoch += 1
+        print(f"starting from checkpoint. first epoch will be {starting_epoch}")
 
     # Define the loss function and optimizer
     criterion = nn.CrossEntropyLoss()
@@ -133,61 +185,44 @@ def train_model(
     train_losses = []
     validation_losses = []
 
-    for epoch in range(num_epochs):
+    for epoch in range(starting_epoch, num_epochs):
         encoder.train()
         decoder_docstring.train()
         decoder_code.train()
 
-        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}")
-        for i, (code_input, docstring_input, lang_token_id) in enumerate(progress_bar):
+        progress_bar = tqdm(range(batches_per_epoch))
+        dataloader_iter = iter(dataloader)
+        for i in progress_bar:
+            code_input, docstring_input, lang_token_id = next(dataloader_iter)
             # Get the code and docstring tensors
             # Move the input tensors to the device
-            code_input = code_input.to(device).transpose(0, 1)  # (seq_len, batch_size)
-            docstring_input = docstring_input.to(device).transpose(
-                0, 1
-            )  # (seq_len, batch_size)
+            code_input = code_input.to(device).transpose(0, 1)  # (batch_size, seq_len)
+            docstring_input = docstring_input.to(device).transpose(0, 1)  # (batch_size, seq_len)
             lang_token_id = lang_token_id.to(device)  # (batch_size, 1)
 
             # # Generate masks
-
-            code_padding_mask = create_padding_mask(
-                code_input, code_tokenizer_pad_idx
-            )  # (batch_size, seq_len)
-
-            code_mask = generate_square_subsequent_mask(code_input.size(0)).to(
-                device
-            )  # (sq_len+1, sq_len+1)
-            docstring_mask = generate_square_subsequent_mask(
-                docstring_input.size(0)
-            ).to(
-                device
-            )  # (sq_len, sq_len)
+            code_padding_mask = create_padding_mask(code_input, code_tokenizer_pad_idx)  # (batch_size, seq_len)
+            code_mask = generate_square_subsequent_mask(code_input.size(0)).to(device)  # (sq_len+1, sq_len+1)
+            docstring_mask = generate_square_subsequent_mask(docstring_input.size(0)).to(device)  # (sq_len, sq_len)
 
             # Zero the parameter gradients
             optimizer.zero_grad()
 
             # Forward pass through the encoder and decoders
-            code_representation = encoder(
-                code_input, code_padding_mask
-            )  # (seq_len, batch_size, d_model)
-            reconstructed_docstring = decoder_docstring(
-                docstring_input, code_representation, docstring_mask
-            )  # (seq_len, batch_size, vocab_size)
-            reconstructed_code = decoder_code(
-                code_input, code_representation, code_mask, lang_token_id
-            )  # (seq_len+1, batch_size, vocab_size)
+            code_representation = encoder(code_input, code_padding_mask)  # (batch_size, seq_len, d_model)
+            reconstructed_docstring = decoder_docstring(docstring_input, code_representation, docstring_mask)  # (batch_size, seq_len, vocab_size)
+            reconstructed_code = decoder_code(code_input, code_representation, code_mask, lang_token_id)  # (batch_size, seq_len+1, vocab_size)
 
             # Calculate the loss
+            doc_output = reconstructed_docstring.permute(1, 0, 2).reshape(-1, reconstructed_docstring.shape[-1])
+            doc_target = docstring_input.transpose(0, 1).view(-1)
+            loss_docstring = criterion(doc_output, doc_target)
 
-            loss_docstring = criterion(
-                reconstructed_docstring,
-                one_hot(docstring_input, num_classes=english_input_dim).float(),
-            )
-            loss_code = criterion(
-                reconstructed_code,
-                one_hot(code_input, num_classes=code_input_dim).float(),
-            )
-            loss = loss_docstring + loss_code
+            code_output = reconstructed_code.permute(1, 0, 2).reshape(-1, reconstructed_code.shape[-1])
+            code_target = code_input.transpose(0, 1).view(-1)
+            loss_code = criterion(code_output, code_target)
+
+            loss = doc_coef * loss_docstring + code_coef * loss_code
 
             # Backward pass and optimization
             loss.backward()
@@ -208,44 +243,50 @@ def train_model(
             valid_dataloader=valid_dataloader,
             device=device,
             code_tokenizer_pad_idx=code_tokenizer_pad_idx,
-            english_input_dim=english_input_dim,
-            code_input_dim=code_input_dim,
             criterion=criterion,
             validation_losses=validation_losses,
             epoch=epoch,
+            code_coef=code_coef,
+            doc_coef=doc_coef
         )
 
-    encoder, decoder_docstring, decoder_code, train_losses, validation_losses
+        if epoch % epochs_per_save == 0:
+            epoch_model_save(encoder, decoder_code, decoder_docstring, output_dir, epoch)
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Trains model on CodeSearchNet dataset"
-    )
+    epoch_model_save(encoder, decoder_code, decoder_docstring, output_dir, num_epochs)
 
-    parser.add_argument(
-        "--max_function_length", type=int, default=512, help="Maximum function length"
-    )
-    parser.add_argument(
-        "--d_model", type=int, default=256, help="Dimension of the model"
-    )
-    parser.add_argument(
-        "--d_hid", type=int, default=512, help="Dimension of the hidden layer"
-    )
+    return train_losses, validation_losses
+
+
+def parse_args():
+    """Parse the command line arguments.
+    """
+    parser = argparse.ArgumentParser(description="Trains model on CodeSearchNet dataset")
+
+    parser.add_argument("--num_epochs", default=5, type=int, help="The number of epochs to train for")
+    parser.add_argument("--max_function_length", type=int, default=512, help="Maximum function length")
+    parser.add_argument("--max_docstring_length", type=int, default=512, help="Maximum docstring length")
+    parser.add_argument("--d_model", type=int, default=256, help="Dimension of the model")
+    parser.add_argument("--d_hid", type=int, default=512, help="Dimension of the hidden layer")
     parser.add_argument("--num_layers", type=int, default=2, help="Number of layers")
-    parser.add_argument(
-        "--nhead",
-        type=int,
-        default=4,
-        help="Number of heads in the multi-head attention mechanism",
-    )
+    parser.add_argument("--nhead", type=int, default=4, help="Number of heads in the multi-head attention mechanism")
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of workers")
     parser.add_argument("--data_dir", type=str, default="data", help="Data dir")
     parser.add_argument("--output_dir", type=str, default="models", help="Output dir")
+    parser.add_argument("--epochs_per_save", type=int, default=10, help="number of epochs between saves")
+    parser.add_argument("--batches_per_epoch", type=int, default=100, help="the number of batches per epoch")
+    parser.add_argument("--code_coefficient", type=float, default=0.5, help="multiplier for the code reconstruction loss")
+    parser.add_argument("--doc_coefficient", type=float, default=0.5, help="multiplier for the doc reconstruction loss")
 
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def main():
+
+    args = parse_args()
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
@@ -261,13 +302,7 @@ def main():
         dataset["validation"], code_tokenizer, english_language_tokenizer, args
     )
 
-    (
-        encoder_model,
-        decoder_docstring_model,
-        decoder_code_model,
-        train_losses,
-        valid_losses,
-    ) = train_model(
+    train_losses, valid_losses = train_model(
         dataloader=train_dataloader,
         valid_dataloader=valid_dataloader,
         device=device,
@@ -279,16 +314,13 @@ def main():
         num_layers=args.num_layers,
         nhead=args.nhead,
         dropout=args.dropout,
+        output_dir=args.output_dir,
+        batches_per_epoch=args.batches_per_epoch
     )
 
     # TODO output this stuff to a file
     print(f"Got training losses: {train_losses}")
     print(f"Got validation losses: {valid_losses}")
-
-    save_model(encoder_model, f"{args.output_dir}/encoder_model.pt")
-    save_model(decoder_docstring_model, f"{args.output_dir}/decoder_docstring_model.pt")
-    save_model(decoder_code_model, f"{args.output_dir}/decoder_code_model.pt")
-
 
 if __name__ == "__main__":
     main()
