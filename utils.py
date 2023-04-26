@@ -36,7 +36,13 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
-def filter_by_token_length(code_tokenizer, english_tokenizer, example, max_code_length=512, max_docstring_length=512):
+def filter_by_token_length(
+    code_tokenizer,
+    english_tokenizer,
+    example,
+    max_code_length=512,
+    max_docstring_length=512,
+):
     """Filter out examples that are too long for the model to handle."""
     tokenized_code = code_tokenizer(example["code"], return_length=True)
     tokenized_docstring = english_tokenizer(example["docstring"], return_length=True)
@@ -47,7 +53,9 @@ def filter_by_token_length(code_tokenizer, english_tokenizer, example, max_code_
     def less_than_max_len(x, ml):
         return x["length"] <= ml
 
-    return less_than_max_len_list(tokenized_code, max_code_length) and less_than_max_len(tokenized_docstring, max_docstring_length)
+    return less_than_max_len_list(
+        tokenized_code, max_code_length
+    ) and less_than_max_len(tokenized_docstring, max_docstring_length)
 
 
 def generate_square_subsequent_mask(sz: int, device="cpu") -> Tensor:
@@ -88,13 +96,20 @@ def create_padding_mask(src: Tensor, pad_idx: int) -> Tensor:
     return mask.to(torch.float32)
 
 
+def add_pad_token(tokenizer):
+    pad_token = "<PAD>"
+    tokenizer.add_tokens([pad_token], special_tokens=True)
+    tokenizer.pad_token = pad_token
+    return tokenizer
+
+
 def get_english_tokenizer():
     """
     Get the english language tokenizer for the model.
     From https://huggingface.co/gpt2
     """
     tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = add_pad_token(tokenizer)
     return tokenizer
 
 
@@ -104,7 +119,7 @@ def get_code_tokenizer():
     From https://github.com/salesforce/CodeGen
     """
     tokenizer = AutoTokenizer.from_pretrained("Salesforce/codegen-2B-mono")
-    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = add_pad_token(tokenizer)
     lang_tokens = [
         "<PYTHON>",
         "<JAVA>",
@@ -136,9 +151,8 @@ def save_model(model, path):
     torch.save(model.state_dict(), path)
 
 
-def load_model(cls, path, *args, **kwargs):
+def load_model(model, path, device):
     """Load pytorch model from path"""
-    model = cls(*args, **kwargs)
-    model.load_state_dict(torch.load(path))
+    model.load_state_dict(torch.load(path, map_location=device))
     model.eval()
     return model

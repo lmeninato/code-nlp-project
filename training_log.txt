@@ -1,0 +1,27 @@
+4/24/2023
+
+Ran the following gpu_job.slurm:
+
+#!/bin/bash
+#SBATCH --job-name=job_wgpu
+#SBATCH --account=csci_ga_2590-2023sp
+#SBATCH --partition=n1s8-v100-1
+#SBATCH --open-mode=append
+#SBATCH --output=./%j_%x.out
+#SBATCH --error=./%j_%x.err
+#SBATCH --export=ALL
+#SBATCH --time=16:00:00
+#SBATCH --gres=gpu:1
+#SBATCH --requeue
+
+singularity exec --bind /scratch --nv --overlay /scratch/lm4244/overlay-25GB-500K.ext3:rw /scratch/lm4244/cuda11.4.2-cudnn8.2.4-devel-ubuntu20.04.3.sif /bin/bash -c "
+source /ext3/env.sh
+cd ~/nyu_sp23_nlp_code_translation
+conda activate nlp-final-project
+pip install -r requirements.txt
+python ./main.py --num_epochs=40 --batches_per_epoch=500 --max_function_length=256 --max_docstring_length=256 > model_results.txt
+"
+
+
+# note for inference:
+# python ./main.py --inference --max_function_length=256 --max_docstring_length=256

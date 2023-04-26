@@ -41,7 +41,14 @@ class CodeSearchNetDataset(Dataset):
     )
     """
 
-    def __init__(self, data, code_tokenizer, english_tokenizer, max_code_length=512, max_docstring_length=512):
+    def __init__(
+        self,
+        data,
+        code_tokenizer,
+        english_tokenizer,
+        max_code_length=512,
+        max_docstring_length=512,
+    ):
         """
         Initialize the dataset with data, tokenizer, and max_length.
 
@@ -75,33 +82,59 @@ class CodeSearchNetDataset(Dataset):
         docstring = sample["docstring"]
         language = sample["language"]
 
-        # Get the corresponding special token using the dictionary
-        lang_token = self.code_tokenizer.lang_to_token[language.lower()]
-        # Convert the lang_token to its corresponding ID
-        lang_token_id = self.code_tokenizer.convert_tokens_to_ids(lang_token)
-        lang_token_id_tensor = torch.tensor([lang_token_id], dtype=torch.long)
+        lang_token_id_tensor = get_lang_token_id_tensor(self.code_tokenizer, language)
 
-        tokenized_code = self.code_tokenizer(
-            code,
-            truncation=True,
-            max_length=self.max_code_length + 1,
-            padding="max_length",
-            return_tensors="pt",
+        tokenized_docstring = get_padded_tokenized_tensor(
+            self.english_tokenizer,
+            docstring,
+            self.max_code_length,
+            self.english_tokenizer.bos_token_id,
+            self.english_tokenizer.eos_token_id,
         )
 
-        tokenized_docstring = self.english_tokenizer(
-            docstring,
-            truncation=True,
-            max_length=self.max_docstring_length,
-            padding="max_length",
-            return_tensors="pt",
+        tokenized_code = get_padded_tokenized_tensor(
+            self.code_tokenizer,
+            code,
+            self.max_code_length + 1,
+            self.code_tokenizer.bos_token_id,
+            self.code_tokenizer.eos_token_id,
         )
 
         return (
-            tokenized_code["input_ids"].squeeze(0),
-            tokenized_docstring["input_ids"].squeeze(0),
+            tokenized_code,
+            tokenized_docstring,
             lang_token_id_tensor,
         )
+
+
+def get_padded_tokenized_tensor(
+    tokenizer, item, max_length, begin_token_id, end_token_id
+):
+    tokenized_item = tokenizer(
+        item,
+        truncation=True,
+        max_length=max_length,
+        padding="max_length",
+        return_tensors="pt",
+    )["input_ids"].squeeze(0)
+
+    indices_to_pad_id = (tokenized_item == tokenizer.pad_token_id).nonzero()
+    first_pad_index = indices_to_pad_id[0, 0]
+    tokenized_item[first_pad_index] = end_token_id
+    tokenized_item = torch.cat(
+        (torch.Tensor([begin_token_id]), tokenized_item),
+        dim=0,
+    ).long()
+
+    return tokenized_item
+
+
+def get_lang_token_id_tensor(tokenizer, language):
+    # Get the corresponding special token using the dictionary
+    lang_token = tokenizer.lang_to_token[language.lower()]
+    # Convert the lang_token to its corresponding ID
+    lang_token_id = tokenizer.convert_tokens_to_ids(lang_token)
+    return torch.tensor([lang_token_id], dtype=torch.long)
 
 
 def download_dataset_from_kaggle(path="data"):
@@ -173,12 +206,20 @@ def get_dataloader(dataset, code_tokenizer, english_tokenizer, args):
     # Filter out examples with more than 512 tokens (or args.max_function_length)
     dataset = dataset.filter(
         lambda example: filter_by_token_length(
-            code_tokenizer, english_tokenizer, example, args.max_function_length, args.max_docstring_length
+            code_tokenizer,
+            english_tokenizer,
+            example,
+            args.max_function_length,
+            args.max_docstring_length,
         )
     )
 
     dataset = CodeSearchNetDataset(
-        dataset, code_tokenizer, english_tokenizer, max_code_length=args.max_function_length, max_docstring_length=args.max_docstring_length
+        dataset,
+        code_tokenizer,
+        english_tokenizer,
+        max_code_length=args.max_function_length,
+        max_docstring_length=args.max_docstring_length,
     )
 
     return DataLoader(
