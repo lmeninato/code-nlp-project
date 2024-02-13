@@ -53,9 +53,9 @@ def filter_by_token_length(
     def less_than_max_len(x, ml):
         return x["length"] <= ml
 
-    return less_than_max_len_list(
-        tokenized_code, max_code_length
-    ) and less_than_max_len(tokenized_docstring, max_docstring_length)
+    return less_than_max_len(tokenized_code, max_code_length) and less_than_max_len(
+        tokenized_docstring, max_docstring_length
+    )
 
 
 def generate_square_subsequent_mask(sz: int, device="cpu") -> Tensor:
@@ -113,13 +113,7 @@ def get_english_tokenizer():
     return tokenizer
 
 
-def get_code_tokenizer():
-    """
-    Get the tokenizer for the model.
-    From https://github.com/salesforce/CodeGen
-    """
-    tokenizer = AutoTokenizer.from_pretrained("Salesforce/codegen-2B-mono")
-    tokenizer = add_pad_token(tokenizer)
+def add_language_tokens(tokenizer):
     lang_tokens = [
         "<PYTHON>",
         "<JAVA>",
@@ -140,6 +134,17 @@ def get_code_tokenizer():
         "php": "<PHP>",
     }
     tokenizer.lang_to_token = lang_to_token
+    return tokenizer
+
+
+def get_code_tokenizer():
+    """
+    Get the tokenizer for the model.
+    From https://github.com/salesforce/CodeGen
+    """
+    tokenizer = AutoTokenizer.from_pretrained("Salesforce/codegen-2B-mono")
+    tokenizer = add_pad_token(tokenizer)
+    tokenizer = add_language_tokens(tokenizer)
 
     return tokenizer
 

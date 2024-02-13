@@ -48,6 +48,7 @@ class CodeSearchNetDataset(Dataset):
         english_tokenizer,
         max_code_length=512,
         max_docstring_length=512,
+        get_lang_token=True,
     ):
         """
         Initialize the dataset with data, tokenizer, and max_length.
@@ -62,6 +63,7 @@ class CodeSearchNetDataset(Dataset):
         self.english_tokenizer = english_tokenizer
         self.max_code_length = max_code_length
         self.max_docstring_length = max_docstring_length
+        self.get_lang_token = get_lang_token
 
     def __len__(self):
         return len(self.data)
@@ -82,7 +84,12 @@ class CodeSearchNetDataset(Dataset):
         docstring = sample["docstring"]
         language = sample["language"]
 
-        lang_token_id_tensor = get_lang_token_id_tensor(self.code_tokenizer, language)
+        if self.get_lang_token:
+            lang_token_id_tensor = get_lang_token_id_tensor(
+                self.code_tokenizer, language
+            )
+        else:
+            lang_token_id_tensor = None
 
         tokenized_docstring = get_padded_tokenized_tensor(
             self.english_tokenizer,
@@ -195,7 +202,16 @@ def load_local_dataset(lang="all", path="data"):
     return dataset
 
 
-def get_dataloader(dataset, code_tokenizer, english_tokenizer, args):
+def get_dataloader(
+    dataset,
+    code_tokenizer,
+    english_tokenizer,
+    max_function_length,
+    max_docstring_length,
+    batch_size,
+    num_workers,
+    get_lang_token=True,
+):
     """
     Get the data. Either train or validation.
     Filter out examples with more than 512 tokens (or args.max_function_length).
@@ -209,8 +225,8 @@ def get_dataloader(dataset, code_tokenizer, english_tokenizer, args):
             code_tokenizer,
             english_tokenizer,
             example,
-            args.max_function_length,
-            args.max_docstring_length,
+            max_function_length,
+            max_docstring_length,
         )
     )
 
@@ -218,18 +234,20 @@ def get_dataloader(dataset, code_tokenizer, english_tokenizer, args):
         dataset,
         code_tokenizer,
         english_tokenizer,
-        max_code_length=args.max_function_length,
-        max_docstring_length=args.max_docstring_length,
+        max_code_length=max_function_length,
+        max_docstring_length=max_docstring_length,
+        get_lang_token=get_lang_token,
     )
 
     return DataLoader(
         dataset,
-        batch_size=args.batch_size,
+        batch_size=batch_size,
         shuffle=True,
-        num_workers=args.num_workers,
+        num_workers=num_workers,
         pin_memory=True,
     )
 
 
 if __name__ == "__main__":
-    download_dataset_from_kaggle()
+    # download_dataset_from_kaggle()
+    pass

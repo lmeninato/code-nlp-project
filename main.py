@@ -424,10 +424,22 @@ def main(args, device):
     dataset = load_local_dataset("python", args.data_dir)
 
     train_dataloader = get_dataloader(
-        dataset["train"], code_tokenizer, english_language_tokenizer, args
+        dataset["train"],
+        code_tokenizer,
+        english_language_tokenizer,
+        args.max_function_length,
+        args.max_docstring_length,
+        args.batch_size,
+        args.num_workers,
     )
     valid_dataloader = get_dataloader(
-        dataset["validation"], code_tokenizer, english_language_tokenizer, args
+        dataset["validation"],
+        code_tokenizer,
+        english_language_tokenizer,
+        args.max_function_length,
+        args.max_docstring_length,
+        args.batch_size,
+        args.num_workers,
     )
 
     train_losses, valid_losses = train_model(
@@ -489,7 +501,13 @@ def get_models_for_inference(args, device):
     dataset = load_local_dataset("python", args.data_dir)
 
     valid_dataloader = get_dataloader(
-        dataset["validation"], code_tokenizer, english_language_tokenizer, args
+        dataset["validation"],
+        code_tokenizer,
+        english_language_tokenizer,
+        args.max_function_length,
+        args.max_docstring_length,
+        args.batch_size,
+        args.num_workers,
     )
 
     return (
